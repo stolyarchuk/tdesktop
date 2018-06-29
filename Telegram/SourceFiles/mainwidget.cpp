@@ -69,7 +69,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/qthelp_regex.h"
 #include "base/qthelp_url.h"
 #include "base/flat_set.h"
-#include "window/player_wrap_widget.h"
+#include "window/window_top_bar_wrap.h"
 #include "window/notifications_manager.h"
 #include "window/window_slide_animation.h"
 #include "window/window_controller.h"
@@ -79,6 +79,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "core/update_checker.h"
 #include "calls/calls_instance.h"
 #include "calls/calls_top_bar.h"
+#include "export/export_settings.h"
+#include "export/view/export_view_top_bar.h"
+#include "export/view/export_view_panel_controller.h"
 #include "auth_session.h"
 #include "storage/storage_facade.h"
 #include "storage/storage_shared_media.h"
@@ -269,6 +272,12 @@ MainWidget::MainWidget(
 		}
 	});
 	subscribe(Auth().calls().currentCallChanged(), [this](Calls::Call *call) { setCurrentCall(call); });
+
+	Auth().data().currentExportView(
+	) | rpl::start_with_next([=](Export::View::PanelController *view) {
+		setCurrentExportView(view);
+	}, lifetime());
+
 	subscribe(_controller->dialogsListFocused(), [this](bool) {
 		updateDialogsWidthAnimated();
 	});
@@ -1266,162 +1275,6 @@ Dialogs::IndexedList *MainWidget::contactsNoDialogsList() {
 	return _dialogs->contactsNoDialogsList();
 }
 
-void MainWidget::sendMessage(const MessageToSend &message) {
-	const auto history = message.history;
-	const auto peer = history->peer;
-	auto &textWithTags = message.textWithTags;
-
-	auto options = ApiWrap::SendOptions(history);
-	options.clearDraft = message.clearDraft;
-	options.replyTo = message.replyTo;
-	options.generateLocal = true;
-	options.webPageId = message.webPageId;
-	Auth().api().sendAction(options);
-
-	if (!peer->canWrite()) {
-		return;
-	}
-	saveRecentHashtags(textWithTags.text);
-
-	auto sending = TextWithEntities();
-	auto left = TextWithEntities {
-		textWithTags.text,
-		ConvertTextTagsToEntities(textWithTags.tags)
-	};
-	auto prepareFlags = Ui::ItemTextOptions(history, App::self()).flags;
-	TextUtilities::PrepareForSending(left, prepareFlags);
-
-	HistoryItem *lastMessage = nullptr;
-
-	while (TextUtilities::CutPart(sending, left, MaxMessageSize)) {
-		auto newId = FullMsgId(peerToChannel(peer->id), clientMsgId());
-		auto randomId = rand_value<uint64>();
-
-		TextUtilities::Trim(sending);
-
-		App::historyRegRandom(randomId, newId);
-		App::historyRegSentData(randomId, peer->id, sending.text);
-
-		MTPstring msgText(MTP_string(sending.text));
-		auto flags = NewMessageFlags(peer) | MTPDmessage::Flag::f_entities;
-		auto sendFlags = MTPmessages_SendMessage::Flags(0);
-		if (message.replyTo) {
-			flags |= MTPDmessage::Flag::f_reply_to_msg_id;
-			sendFlags |= MTPmessages_SendMessage::Flag::f_reply_to_msg_id;
-		}
-		MTPMessageMedia media = MTP_messageMediaEmpty();
-		if (message.webPageId == CancelledWebPageId) {
-			sendFlags |= MTPmessages_SendMessage::Flag::f_no_webpage;
-		} else if (message.webPageId) {
-			auto page = Auth().data().webpage(message.webPageId);
-			media = MTP_messageMediaWebPage(
-				MTP_webPagePending(
-					MTP_long(page->id),
-					MTP_int(page->pendingTill)));
-			flags |= MTPDmessage::Flag::f_media;
-		}
-		bool channelPost = peer->isChannel() && !peer->isMegagroup();
-		bool silentPost = channelPost
-			&& Auth().data().notifySilentPosts(peer);
-		if (channelPost) {
-			flags |= MTPDmessage::Flag::f_views;
-			flags |= MTPDmessage::Flag::f_post;
-		}
-		if (!channelPost) {
-			flags |= MTPDmessage::Flag::f_from_id;
-		} else if (peer->asChannel()->addsSignature()) {
-			flags |= MTPDmessage::Flag::f_post_author;
-		}
-		if (silentPost) {
-			sendFlags |= MTPmessages_SendMessage::Flag::f_silent;
-		}
-		auto localEntities = TextUtilities::EntitiesToMTP(sending.entities);
-		auto sentEntities = TextUtilities::EntitiesToMTP(sending.entities, TextUtilities::ConvertOption::SkipLocal);
-		if (!sentEntities.v.isEmpty()) {
-			sendFlags |= MTPmessages_SendMessage::Flag::f_entities;
-		}
-		if (message.clearDraft) {
-			sendFlags |= MTPmessages_SendMessage::Flag::f_clear_draft;
-			history->clearCloudDraft();
-		}
-		auto messageFromId = channelPost ? 0 : Auth().userId();
-		auto messagePostAuthor = channelPost
-			? App::peerName(Auth().user())
-			: QString();
-		lastMessage = history->addNewMessage(
-			MTP_message(
-				MTP_flags(flags),
-				MTP_int(newId.msg),
-				MTP_int(messageFromId),
-				peerToMTP(peer->id),
-				MTPnullFwdHeader,
-				MTPint(),
-				MTP_int(message.replyTo),
-				MTP_int(unixtime()),
-				msgText,
-				media,
-				MTPnullMarkup,
-				localEntities,
-				MTP_int(1),
-				MTPint(),
-				MTP_string(messagePostAuthor),
-				MTPlong()),
-			NewMessageUnread);
-		history->sendRequestId = MTP::send(
-			MTPmessages_SendMessage(
-				MTP_flags(sendFlags),
-				peer->input,
-				MTP_int(message.replyTo),
-				msgText,
-				MTP_long(randomId),
-				MTPnullMarkup,
-				sentEntities),
-			rpcDone(&MainWidget::sentUpdatesReceived, randomId),
-			rpcFail(&MainWidget::sendMessageFail),
-			0,
-			0,
-			history->sendRequestId);
-	}
-
-	finishForwarding(history);
-}
-
-void MainWidget::saveRecentHashtags(const QString &text) {
-	bool found = false;
-	QRegularExpressionMatch m;
-	RecentHashtagPack recent(cRecentWriteHashtags());
-	for (int32 i = 0, next = 0; (m = TextUtilities::RegExpHashtag().match(text, i)).hasMatch(); i = next) {
-		i = m.capturedStart();
-		next = m.capturedEnd();
-		if (m.hasMatch()) {
-			if (!m.capturedRef(1).isEmpty()) {
-				++i;
-			}
-			if (!m.capturedRef(2).isEmpty()) {
-				--next;
-			}
-		}
-		const auto tag = text.mid(i + 1, next - i - 1);
-		if (TextUtilities::RegExpHashtagExclude().match(tag).hasMatch()) {
-			continue;
-		}
-		if (!found && cRecentWriteHashtags().isEmpty() && cRecentSearchHashtags().isEmpty()) {
-			Local::readRecentHashtagsAndBots();
-			recent = cRecentWriteHashtags();
-		}
-		found = true;
-		Stickers::IncrementRecentHashtag(recent, tag);
-	}
-	if (found) {
-		cSetRecentWriteHashtags(recent);
-		Local::writeRecentHashtagsAndBots();
-	}
-}
-
-void MainWidget::unreadCountChanged(not_null<History*> history) {
-	_history->unreadCountChanged(history);
-}
-
 TimeMs MainWidget::highlightStartTime(not_null<const HistoryItem*> item) const {
 	return _history->highlightStartTime(item);
 }
@@ -1578,7 +1431,7 @@ void MainWidget::createPlayer() {
 		return;
 	}
 	if (!_player) {
-		_player.create(this);
+		_player.create(this, object_ptr<Media::Player::Widget>(this));
 		rpl::merge(
 			_player->heightValue() | rpl::map([] { return true; }),
 			_player->shownValue()
@@ -1645,6 +1498,7 @@ void MainWidget::setCurrentCall(Calls::Call *call) {
 
 void MainWidget::createCallTopBar() {
 	Expects(_currentCall != nullptr);
+
 	_callTopBar.create(this, object_ptr<Calls::TopBar>(this, _currentCall));
 	_callTopBar->heightValue(
 	) | rpl::start_with_next([this](int value) {
@@ -1676,6 +1530,78 @@ void MainWidget::callTopBarHeightUpdated(int callTopBarHeight) {
 		_contentScrollAddToY += callTopBarHeight - _callTopBarHeight;
 		_callTopBarHeight = callTopBarHeight;
 		updateControlsGeometry();
+	}
+}
+
+void MainWidget::setCurrentExportView(Export::View::PanelController *view) {
+	_currentExportView = view;
+	if (_currentExportView) {
+		_currentExportView->progressState(
+		) | rpl::start_with_next([=](Export::View::Content &&data) {
+			if (!data.rows.empty()
+				&& data.rows[0].id == Export::View::Content::kDoneId) {
+				LOG(("Export Info: Destroy top bar by Done."));
+				destroyExportTopBar();
+			} else if (!_exportTopBar) {
+				LOG(("Export Info: Create top bar by State."));
+				createExportTopBar(std::move(data));
+			} else {
+				_exportTopBar->entity()->updateData(std::move(data));
+			}
+		}, _currentExportView->lifetime());
+	} else {
+		LOG(("Export Info: Destroy top bar by controller removal."));
+		destroyExportTopBar();
+	}
+}
+
+void MainWidget::createExportTopBar(Export::View::Content &&data) {
+	_exportTopBar.create(
+		this,
+		object_ptr<Export::View::TopBar>(this, std::move(data)));
+	rpl::merge(
+		_exportTopBar->heightValue() | rpl::map([] { return true; }),
+		_exportTopBar->shownValue()
+	) | rpl::start_with_next([=] {
+		exportTopBarHeightUpdated();
+	}, _exportTopBar->lifetime());
+	_exportTopBar->entity()->clicks(
+	) | rpl::start_with_next([=] {
+		if (_currentExportView) {
+			_currentExportView->activatePanel();
+		}
+	}, _exportTopBar->lifetime());
+	orderWidgets();
+	if (_a_show.animating()) {
+		_exportTopBar->show(anim::type::instant);
+		_exportTopBar->setVisible(false);
+	} else {
+		_exportTopBar->hide(anim::type::instant);
+		_exportTopBar->show(anim::type::normal);
+		_exportTopBarHeight = _contentScrollAddToY = _exportTopBar->contentHeight();
+		updateControlsGeometry();
+	}
+}
+
+void MainWidget::destroyExportTopBar() {
+	if (_exportTopBar) {
+		_exportTopBar->hide(anim::type::normal);
+	}
+}
+
+void MainWidget::exportTopBarHeightUpdated() {
+	if (!_exportTopBar) {
+		// Player could be already "destroyDelayed", but still handle events.
+		return;
+	}
+	const auto exportTopBarHeight = _exportTopBar->contentHeight();
+	if (exportTopBarHeight != _exportTopBarHeight) {
+		_contentScrollAddToY += exportTopBarHeight - _exportTopBarHeight;
+		_exportTopBarHeight = exportTopBarHeight;
+		updateControlsGeometry();
+	}
+	if (!_exportTopBarHeight && _exportTopBar->isHidden()) {
+		_exportTopBar.destroyDelayed();
 	}
 }
 
@@ -2560,11 +2486,14 @@ void MainWidget::showBackFromStack(
 
 void MainWidget::orderWidgets() {
 	_dialogs->raise();
-	if (_callTopBar) {
-		_callTopBar->raise();
-	}
 	if (_player) {
 		_player->raise();
+	}
+	if (_exportTopBar) {
+		_exportTopBar->raise();
+	}
+	if (_callTopBar) {
+		_callTopBar->raise();
 	}
 	if (_playerVolume) {
 		_playerVolume->raise();
@@ -2767,7 +2696,7 @@ void MainWidget::paintEvent(QPaintEvent *e) {
 }
 
 int MainWidget::getMainSectionTop() const {
-	return _callTopBarHeight + _playerHeight;
+	return _callTopBarHeight + _exportTopBarHeight + _playerHeight;
 }
 
 int MainWidget::getThirdSectionTop() const {
@@ -2916,9 +2845,13 @@ void MainWidget::updateControlsGeometry() {
 			_callTopBar->resizeToWidth(dialogsWidth);
 			_callTopBar->moveToLeft(0, 0);
 		}
+		if (_exportTopBar) {
+			_exportTopBar->resizeToWidth(dialogsWidth);
+			_exportTopBar->moveToLeft(0, _callTopBarHeight);
+		}
 		if (_player) {
 			_player->resizeToWidth(dialogsWidth);
-			_player->moveToLeft(0, _callTopBarHeight);
+			_player->moveToLeft(0, _callTopBarHeight + _exportTopBarHeight);
 		}
 		auto mainSectionGeometry = QRect(
 			0,
@@ -2954,9 +2887,15 @@ void MainWidget::updateControlsGeometry() {
 			_callTopBar->resizeToWidth(mainSectionWidth);
 			_callTopBar->moveToLeft(dialogsWidth, 0);
 		}
+		if (_exportTopBar) {
+			_exportTopBar->resizeToWidth(mainSectionWidth);
+			_exportTopBar->moveToLeft(dialogsWidth, _callTopBarHeight);
+		}
 		if (_player) {
 			_player->resizeToWidth(mainSectionWidth);
-			_player->moveToLeft(dialogsWidth, _callTopBarHeight);
+			_player->moveToLeft(
+				dialogsWidth,
+				_callTopBarHeight + _exportTopBarHeight);
 		}
 		_history->setGeometryToLeft(dialogsWidth, mainSectionTop, mainSectionWidth, height() - mainSectionTop);
 		if (_hider) {
@@ -3730,6 +3669,10 @@ void MainWidget::start(const MTPUser *self) {
 	Local::readRecentStickers();
 	Local::readFavedStickers();
 	Local::readSavedGifs();
+	if (const auto availableAt = Local::ReadExportSettings().availableAt) {
+		Auth().data().suggestStartExport(availableAt);
+	}
+
 	_history->start();
 
 	Messenger::Instance().checkStartUrl();
@@ -4685,6 +4628,19 @@ void MainWidget::feedUpdate(const MTPUpdate &update) {
 	//	}
 	//} break;
 
+	case mtpc_updateDialogUnreadMark: {
+		const auto &data = update.c_updateDialogUnreadMark();
+		const auto history = data.vpeer.match(
+		[&](const MTPDdialogPeer &data) {
+			const auto peerId = peerFromMTP(data.vpeer);
+			return App::historyLoaded(peerId);
+		//}, [&](const MTPDdialogPeerFeed &data) { // #feed
+		});
+		if (history) {
+			history->setUnreadMark(data.is_unread());
+		}
+	} break;
+
 	// Deleted messages.
 	case mtpc_updateDeleteMessages: {
 		auto &d = update.c_updateDeleteMessages();
@@ -5236,16 +5192,15 @@ void MainWidget::feedUpdate(const MTPUpdate &update) {
 
 	////// Cloud drafts
 	case mtpc_updateDraftMessage: {
-		auto &peerDraft = update.c_updateDraftMessage();
-		auto peerId = peerFromMTP(peerDraft.vpeer);
-
-		auto &draftMessage = peerDraft.vdraft;
-		if (draftMessage.type() == mtpc_draftMessage) {
-			auto &draft = draftMessage.c_draftMessage();
-			Data::applyPeerCloudDraft(peerId, draft);
-		} else {
-			Data::clearPeerCloudDraft(peerId);
-		}
+		const auto &data = update.c_updateDraftMessage();
+		const auto peerId = peerFromMTP(data.vpeer);
+		data.vdraft.match([&](const MTPDdraftMessage &data) {
+			Data::applyPeerCloudDraft(peerId, data);
+		}, [&](const MTPDdraftMessageEmpty &data) {
+			Data::clearPeerCloudDraft(
+				peerId,
+				TimeId(data.has_date() ? data.vdate.v : 0));
+		});
 	} break;
 
 	////// Cloud langpacks

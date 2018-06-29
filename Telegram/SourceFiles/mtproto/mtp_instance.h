@@ -60,38 +60,75 @@ public:
 
 	not_null<DcOptions*> dcOptions();
 
-	template <typename TRequest>
+	template <typename Request>
 	mtpRequestId send(
-			const TRequest &request,
+			const Request &request,
 			RPCResponseHandler &&callbacks = {},
-			ShiftedDcId dcId = 0,
+			ShiftedDcId shiftedDcId = 0,
 			TimeMs msCanWait = 0,
-			mtpRequestId after = 0) {
-		return send(
-			mtpRequestData::serialize(request),
+			mtpRequestId afterRequestId = 0) {
+		const auto requestId = GetNextRequestId();
+		sendSerialized(
+			requestId,
+			SecureRequest::Serialize(request),
 			std::move(callbacks),
-			dcId,
+			shiftedDcId,
 			msCanWait,
-			after);
+			afterRequestId);
+		return requestId;
 	}
 
-	template <typename TRequest>
+	template <typename Request>
 	mtpRequestId send(
-			const TRequest &request,
+			const Request &request,
 			RPCDoneHandlerPtr &&onDone,
 			RPCFailHandlerPtr &&onFail = nullptr,
-			ShiftedDcId dc = 0,
+			ShiftedDcId shiftedDcId = 0,
 			TimeMs msCanWait = 0,
-			mtpRequestId after = 0) {
+			mtpRequestId afterRequestId = 0) {
 		return send(
 			request,
 			RPCResponseHandler(std::move(onDone), std::move(onFail)),
-			dc,
+			shiftedDcId,
 			msCanWait,
-			after);
+			afterRequestId);
 	}
 
-	void sendAnything(ShiftedDcId dcId = 0, TimeMs msCanWait = 0);
+	template <typename Request>
+	mtpRequestId sendProtocolMessage(
+			ShiftedDcId shiftedDcId,
+			const Request &request) {
+		const auto requestId = GetNextRequestId();
+		sendRequest(
+			requestId,
+			SecureRequest::Serialize(request),
+			{},
+			shiftedDcId,
+			0,
+			false,
+			0);
+		return requestId;
+	}
+
+	void sendSerialized(
+			mtpRequestId requestId,
+			SecureRequest &&request,
+			RPCResponseHandler &&callbacks,
+			ShiftedDcId shiftedDcId,
+			TimeMs msCanWait,
+			mtpRequestId afterRequestId) {
+		const auto needsLayer = true;
+		sendRequest(
+			requestId,
+			std::move(request),
+			std::move(callbacks),
+			shiftedDcId,
+			msCanWait,
+			needsLayer,
+			afterRequestId);
+	}
+
+	void sendAnything(ShiftedDcId shiftedDcId = 0, TimeMs msCanWait = 0);
 
 	void restart();
 	void restart(ShiftedDcId shiftedDcId);
@@ -116,14 +153,9 @@ public:
 	void setSessionResetHandler(Fn<void(ShiftedDcId shiftedDcId)> handler);
 	void clearGlobalHandlers();
 
-	void onStateChange(ShiftedDcId dcWithShift, int32 state);
-	void onSessionReset(ShiftedDcId dcWithShift);
+	void onStateChange(ShiftedDcId shiftedDcId, int32 state);
+	void onSessionReset(ShiftedDcId shiftedDcId);
 
-	void registerRequest(mtpRequestId requestId, ShiftedDcId dcWithShift);
-	mtpRequestId storeRequest(
-		mtpRequest &request,
-		RPCResponseHandler &&callbacks);
-	mtpRequest getRequest(mtpRequestId requestId);
 	void clearCallbacksDelayed(std::vector<RPCCallbackClear> &&ids);
 
 	void execCallback(mtpRequestId requestId, const mtpPrime *from, const mtpPrime *end);
@@ -161,12 +193,14 @@ private slots:
 	void onKeyDestroyed(qint32 shiftedDcId);
 
 private:
-	mtpRequestId send(
-		mtpRequest &&request,
+	void sendRequest(
+		mtpRequestId requestId,
+		SecureRequest &&request,
 		RPCResponseHandler &&callbacks,
-		ShiftedDcId dcId,
+		ShiftedDcId shiftedDcId,
 		TimeMs msCanWait,
-		mtpRequestId after);
+		bool needsLayer,
+		mtpRequestId afterRequestId);
 
 	class Private;
 	const std::unique_ptr<Private> _private;

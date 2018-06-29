@@ -13,6 +13,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_drafts.h"
 #include "boxes/send_files_box.h"
 #include "window/themes/window_theme.h"
+#include "export/export_settings.h"
 #include "core/crash_reports.h"
 #include "core/update_checker.h"
 #include "observer_peer.h"
@@ -501,6 +502,7 @@ enum { // Local Storage Keys
 	lskStickersKeys = 0x10, // no data
 	lskTrustedBots = 0x11, // no data
 	lskFavedStickers = 0x12, // no data
+	lskExportSettings = 0x13, // no data
 };
 
 enum {
@@ -577,6 +579,7 @@ enum {
 	dbiStickersFavedLimit = 0x50,
 	dbiSuggestStickersByEmoji = 0x51,
 	dbiSuggestEmoji = 0x52,
+	dbiTxtDomainString = 0x53,
 
 	dbiEncryptedWithSalt = 333,
 	dbiEncrypted = 444,
@@ -633,6 +636,8 @@ bool _readingUserSettings = false;
 FileKey _userSettingsKey = 0;
 FileKey _recentHashtagsAndBotsKey = 0;
 bool _recentHashtagsAndBotsWereRead = false;
+
+FileKey _exportSettingsKey = 0;
 
 FileKey _savedPeersKey = 0;
 FileKey _langPackKey = 0;
@@ -1153,6 +1158,14 @@ bool _readSetting(quint32 blockId, QDataStream &stream, int version, ReadSetting
 			return dbiwmWindowAndTray;
 		};
 		Global::RefWorkMode().set(newMode());
+	} break;
+
+	case dbiTxtDomainString: {
+		QString v;
+		stream >> v;
+		if (!_checkStreamStatus(stream)) return false;
+
+		Global::SetTxtDomainString(v);
 	} break;
 
 	case dbiConnectionTypeOld: {
@@ -2065,7 +2078,7 @@ ReadMapState _readMap(const QByteArray &pass) {
 	quint64 recentStickersKeyOld = 0;
 	quint64 installedStickersKey = 0, featuredStickersKey = 0, recentStickersKey = 0, favedStickersKey = 0, archivedStickersKey = 0;
 	quint64 savedGifsKey = 0;
-	quint64 backgroundKey = 0, userSettingsKey = 0, recentHashtagsAndBotsKey = 0, savedPeersKey = 0;
+	quint64 backgroundKey = 0, userSettingsKey = 0, recentHashtagsAndBotsKey = 0, savedPeersKey = 0, exportSettingsKey = 0;
 	while (!map.stream.atEnd()) {
 		quint32 keyType;
 		map.stream >> keyType;
@@ -2167,6 +2180,9 @@ ReadMapState _readMap(const QByteArray &pass) {
 		case lskSavedPeers: {
 			map.stream >> savedPeersKey;
 		} break;
+		case lskExportSettings: {
+			map.stream >> exportSettingsKey;
+		} break;
 		default:
 		LOG(("App Error: unknown key type in encrypted map: %1").arg(keyType));
 		return ReadMapFailed;
@@ -2201,6 +2217,7 @@ ReadMapState _readMap(const QByteArray &pass) {
 	_backgroundKey = backgroundKey;
 	_userSettingsKey = userSettingsKey;
 	_recentHashtagsAndBotsKey = recentHashtagsAndBotsKey;
+	_exportSettingsKey = exportSettingsKey;
 	_oldMapVersion = mapData.version;
 	if (_oldMapVersion < AppVersion) {
 		_mapChanged = true;
@@ -2279,6 +2296,7 @@ void _writeMap(WriteMapWhen when) {
 	if (_backgroundKey) mapSize += sizeof(quint32) + sizeof(quint64);
 	if (_userSettingsKey) mapSize += sizeof(quint32) + sizeof(quint64);
 	if (_recentHashtagsAndBotsKey) mapSize += sizeof(quint32) + sizeof(quint64);
+	if (_exportSettingsKey) mapSize += sizeof(quint32) + sizeof(quint64);
 
 	if (mapSize > 30 * 1024 * 1024) {
 		CrashReports::SetAnnotation("MapSize", QString("%1,%2,%3,%4,%5"
@@ -2355,6 +2373,9 @@ void _writeMap(WriteMapWhen when) {
 	}
 	if (_recentHashtagsAndBotsKey) {
 		mapData.stream << quint32(lskRecentHashtagsAndBots) << quint64(_recentHashtagsAndBotsKey);
+	}
+	if (_exportSettingsKey) {
+		mapData.stream << quint32(lskExportSettings) << quint64(_exportSettingsKey);
 	}
 	map.writeEncrypted(mapData);
 
@@ -2462,6 +2483,7 @@ void writeSettings() {
 	quint32 size = 12 * (sizeof(quint32) + sizeof(qint32));
 	size += sizeof(quint32) + Serialize::bytearraySize(dcOptionsSerialized);
 	size += sizeof(quint32) + Serialize::stringSize(cLoggedPhoneNumber());
+	size += sizeof(quint32) + Serialize::stringSize(Global::TxtDomainString());
 
 	auto &proxies = Global::RefProxiesList();
 	const auto &proxy = Global::SelectedProxy();
@@ -2500,6 +2522,7 @@ void writeSettings() {
 	data.stream << quint32(dbiScale) << qint32(cConfigScale());
 	data.stream << quint32(dbiDcOptions) << dcOptionsSerialized;
 	data.stream << quint32(dbiLoggedPhoneNumber) << cLoggedPhoneNumber();
+	data.stream << quint32(dbiTxtDomainString) << Global::TxtDomainString();
 
 	data.stream << quint32(dbiConnectionType) << qint32(dbictProxiesList);
 	data.stream << qint32(proxies.size());
@@ -2613,7 +2636,7 @@ void reset() {
 	_recentStickersKeyOld = 0;
 	_installedStickersKey = _featuredStickersKey = _recentStickersKey = _favedStickersKey = _archivedStickersKey = 0;
 	_savedGifsKey = 0;
-	_backgroundKey = _userSettingsKey = _recentHashtagsAndBotsKey = _savedPeersKey = 0;
+	_backgroundKey = _userSettingsKey = _recentHashtagsAndBotsKey = _savedPeersKey = _exportSettingsKey = 0;
 	_oldMapVersion = _oldSettingsVersion = 0;
 	StoredAuthSessionCache.reset();
 	_mapChanged = true;
@@ -4600,6 +4623,168 @@ void readRecentHashtagsAndBots() {
 		}
 		cSetRecentInlineBots(bots);
 	}
+}
+
+void incrementRecentHashtag(RecentHashtagPack &recent, const QString &tag) {
+	auto i = recent.begin(), e = recent.end();
+	for (; i != e; ++i) {
+		if (i->first == tag) {
+			++i->second;
+			if (qAbs(i->second) > 0x4000) {
+				for (auto j = recent.begin(); j != e; ++j) {
+					if (j->second > 1) {
+						j->second /= 2;
+					} else if (j->second > 0) {
+						j->second = 1;
+					}
+				}
+			}
+			for (; i != recent.begin(); --i) {
+				if (qAbs((i - 1)->second) > qAbs(i->second)) {
+					break;
+				}
+				qSwap(*i, *(i - 1));
+			}
+			break;
+		}
+	}
+	if (i == e) {
+		while (recent.size() >= 64) recent.pop_back();
+		recent.push_back(qMakePair(tag, 1));
+		for (i = recent.end() - 1; i != recent.begin(); --i) {
+			if ((i - 1)->second > i->second) {
+				break;
+			}
+			qSwap(*i, *(i - 1));
+		}
+	}
+}
+
+base::optional<RecentHashtagPack> saveRecentHashtags(
+		Fn<RecentHashtagPack()> getPack,
+		const QString &text) {
+	auto found = false;
+	auto m = QRegularExpressionMatch();
+	auto recent = getPack();
+	for (auto i = 0, next = 0; (m = TextUtilities::RegExpHashtag().match(text, i)).hasMatch(); i = next) {
+		i = m.capturedStart();
+		next = m.capturedEnd();
+		if (m.hasMatch()) {
+			if (!m.capturedRef(1).isEmpty()) {
+				++i;
+			}
+			if (!m.capturedRef(2).isEmpty()) {
+				--next;
+			}
+		}
+		const auto tag = text.mid(i + 1, next - i - 1);
+		if (TextUtilities::RegExpHashtagExclude().match(tag).hasMatch()) {
+			continue;
+		}
+		if (!found
+			&& cRecentWriteHashtags().isEmpty()
+			&& cRecentSearchHashtags().isEmpty()) {
+			Local::readRecentHashtagsAndBots();
+			recent = getPack();
+		}
+		found = true;
+		incrementRecentHashtag(recent, tag);
+	}
+	return found ? base::make_optional(recent) : base::none;
+}
+
+void saveRecentSentHashtags(const QString &text) {
+	const auto result = saveRecentHashtags(
+		[] { return cRecentWriteHashtags(); },
+		text);
+	if (result) {
+		cSetRecentWriteHashtags(*result);
+		Local::writeRecentHashtagsAndBots();
+	}
+}
+
+void saveRecentSearchHashtags(const QString &text) {
+	const auto result = saveRecentHashtags(
+		[] { return cRecentSearchHashtags(); },
+		text);
+	if (result) {
+		cSetRecentSearchHashtags(*result);
+		Local::writeRecentHashtagsAndBots();
+	}
+}
+
+void WriteExportSettings(const Export::Settings &settings) {
+	if (!_working()) return;
+
+	const auto check = Export::Settings();
+	if (settings.types == check.types
+		&& settings.fullChats == check.fullChats
+		&& settings.media.types == check.media.types
+		&& settings.media.sizeLimit == check.media.sizeLimit
+		&& settings.path == check.path
+		&& settings.format == check.format
+		&& settings.availableAt == check.availableAt) {
+		if (_exportSettingsKey) {
+			clearKey(_exportSettingsKey);
+			_exportSettingsKey = 0;
+			_mapChanged = true;
+		}
+		_writeMap();
+	} else {
+		if (!_exportSettingsKey) {
+			_exportSettingsKey = genKey();
+			_mapChanged = true;
+			_writeMap(WriteMapWhen::Fast);
+		}
+		quint32 size = sizeof(quint32) * 6
+			+ Serialize::stringSize(settings.path);
+		EncryptedDescriptor data(size);
+		data.stream
+			<< quint32(settings.types)
+			<< quint32(settings.fullChats)
+			<< quint32(settings.media.types)
+			<< quint32(settings.media.sizeLimit)
+			<< quint32(settings.format)
+			<< settings.path
+			<< quint32(settings.availableAt);
+
+		FileWriteDescriptor file(_exportSettingsKey);
+		file.writeEncrypted(data);
+	}
+}
+
+Export::Settings ReadExportSettings() {
+	FileReadDescriptor file;
+	if (!readEncryptedFile(file, _exportSettingsKey)) {
+		clearKey(_exportSettingsKey);
+		_exportSettingsKey = 0;
+		_writeMap();
+		return Export::Settings();
+	}
+
+	quint32 types = 0, fullChats = 0;
+	quint32 mediaTypes = 0, mediaSizeLimit = 0;
+	quint32 format = 0, availableAt = 0;
+	QString path;
+	file.stream
+		>> types
+		>> fullChats
+		>> mediaTypes
+		>> mediaSizeLimit
+		>> format
+		>> path
+		>> availableAt;
+	auto result = Export::Settings();
+	result.types = Export::Settings::Types::from_raw(types);
+	result.fullChats = Export::Settings::Types::from_raw(fullChats);
+	result.media.types = Export::MediaSettings::Types::from_raw(mediaTypes);
+	result.media.sizeLimit = mediaSizeLimit;
+	result.format = Export::Output::Format(format);
+	result.path = path;
+	result.availableAt = availableAt;
+	return (file.stream.status() == QDataStream::Ok && result.validate())
+		? result
+		: Export::Settings();
 }
 
 void writeSavedPeers() {

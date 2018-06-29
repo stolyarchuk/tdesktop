@@ -7,9 +7,19 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include "logs.h"
 #include "core/basic_types.h"
 #include "base/flags.h"
 #include "base/algorithm.h"
+#include "base/assertion.h"
+#include "base/bytes.h"
+
+#include <QtCore/QReadWriteLock>
+#include <QtCore/QRegularExpression>
+#include <QtNetwork/QNetworkProxy>
+
+#include <cmath>
+#include <set>
 
 // Define specializations for QByteArray for Qt 5.3.2, because
 // QByteArray in Qt 5.3.2 doesn't declare "pointer" subtype.
@@ -179,33 +189,11 @@ inline void accumulate_max(T &a, const T &b) { if (a < b) a = b; }
 template <typename T>
 inline void accumulate_min(T &a, const T &b) { if (a > b) a = b; }
 
-class Exception : public std::exception {
-public:
-	Exception(const QString &msg, bool isFatal = true) : _fatal(isFatal), _msg(msg.toUtf8()) {
-		LOG(("Exception: %1").arg(msg));
-	}
-	bool fatal() const {
-		return _fatal;
-	}
-
-	virtual const char *what() const throw() {
-		return _msg.constData();
-	}
-	virtual ~Exception() throw() {
-	}
-
-private:
-	bool _fatal;
-	QByteArray _msg;
-
-};
-
-using TimeId = int32;
 void unixtimeInit();
 void unixtimeSet(TimeId serverTime, bool force = false);
 TimeId unixtime();
 uint64 msgid();
-int32 reqid();
+int GetNextRequestId();
 
 QDateTime ParseDateTime(TimeId serverTime);
 
@@ -224,7 +212,6 @@ void finish();
 
 }
 
-using TimeMs = int64;
 bool checkms(); // returns true if time has changed
 TimeMs getms(bool checked = false);
 
@@ -414,11 +401,13 @@ struct ProxyData {
 	bool valid() const;
 	bool supportsCalls() const;
 	bool tryCustomResolve() const;
+	bytes::vector secretFromMtprotoPassword() const;
 	explicit operator bool() const;
 	bool operator==(const ProxyData &other) const;
 	bool operator!=(const ProxyData &other) const;
 
-	static bool ValidSecret(const QString &secret);
+	static bool ValidMtprotoPassword(const QString &secret);
+	static int MaxMtprotoPasswordLength();
 
 };
 
@@ -453,35 +442,6 @@ enum DBIPeerReportSpamStatus {
 	dbiprsHidden = 4, // hidden in the cloud or not needed (bots, contacts, etc), no more requests
 	dbiprsRequesting = 5, // requesting the cloud setting right now
 };
-
-class MimeType {
-public:
-	enum class Known {
-		Unknown,
-		TDesktopTheme,
-		TDesktopPalette,
-		WebP,
-	};
-
-	MimeType(const QMimeType &type) : _typeStruct(type) {
-	}
-	MimeType(Known type) : _type(type) {
-	}
-	QStringList globPatterns() const;
-	QString filterString() const;
-	QString name() const;
-
-private:
-	QMimeType _typeStruct;
-	Known _type = Known::Unknown;
-
-};
-
-MimeType mimeTypeForName(const QString &mime);
-MimeType mimeTypeForFile(const QFileInfo &file);
-MimeType mimeTypeForData(const QByteArray &data);
-
-#include <cmath>
 
 inline int rowscount(int fullCount, int countPerRow) {
 	return (fullCount + countPerRow - 1) / countPerRow;

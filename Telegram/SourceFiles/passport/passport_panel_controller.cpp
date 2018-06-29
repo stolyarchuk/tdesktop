@@ -138,6 +138,7 @@ EditDocumentScheme GetDocumentScheme(
 				NameValidate,
 				DontFormat,
 				kMaxNameSize,
+				qsl("first_name")
 			},
 			{
 				ValueClass::Fields,
@@ -1204,6 +1205,10 @@ int PanelController::closeGetDuration() {
 
 void PanelController::cancelAuth() {
 	_form->cancel();
+}
+
+void PanelController::cancelAuthSure() {
+	_form->cancelSure();
 }
 
 void PanelController::showBox(

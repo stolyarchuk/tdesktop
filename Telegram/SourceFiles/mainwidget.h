@@ -40,6 +40,14 @@ class Float;
 } // namespace Player
 } // namespace Media
 
+namespace Export {
+namespace View {
+class TopBar;
+class PanelController;
+struct Content;
+} // namespace View
+} // namespace Export
+
 namespace Ui {
 class ResizeArea;
 class PlainShadow;
@@ -50,7 +58,8 @@ class SlideWrap;
 
 namespace Window {
 class Controller;
-class PlayerWrapWidget;
+template <typename Inner>
+class TopBarWrapWidget;
 class SectionMemento;
 class SectionWidget;
 class AbstractSectionWidget;
@@ -212,21 +221,6 @@ public:
 	Dialogs::IndexedList *contactsList();
 	Dialogs::IndexedList *dialogsList();
 	Dialogs::IndexedList *contactsNoDialogsList();
-
-	struct MessageToSend {
-		MessageToSend(not_null<History*> history) : history(history) {
-		}
-
-		not_null<History*> history;
-		TextWithTags textWithTags;
-		MsgId replyTo = 0;
-		WebPageId webPageId = 0;
-		bool clearDraft = true;
-	};
-	void sendMessage(const MessageToSend &message);
-	void saveRecentHashtags(const QString &text);
-
-	void unreadCountChanged(not_null<History*> history);
 
 	// While HistoryInner is not HistoryView::ListWidget.
 	TimeMs highlightStartTime(not_null<const HistoryItem*> item) const;
@@ -422,6 +416,11 @@ private:
 	void destroyCallTopBar();
 	void callTopBarHeightUpdated(int callTopBarHeight);
 
+	void setCurrentExportView(Export::View::PanelController *view);
+	void createExportTopBar(Export::View::Content &&data);
+	void destroyExportTopBar();
+	void exportTopBarHeightUpdated();
+
 	void messagesAffected(
 		not_null<PeerData*> peer,
 		const MTPmessages_AffectedMessages &result);
@@ -545,7 +544,12 @@ private:
 	base::weak_ptr<Calls::Call> _currentCall;
 	object_ptr<Ui::SlideWrap<Calls::TopBar>> _callTopBar = { nullptr };
 
-	object_ptr<Window::PlayerWrapWidget> _player = { nullptr };
+	Export::View::PanelController *_currentExportView = nullptr;
+	object_ptr<Window::TopBarWrapWidget<Export::View::TopBar>> _exportTopBar
+		= { nullptr };
+
+	object_ptr<Window::TopBarWrapWidget<Media::Player::Widget>> _player
+		= { nullptr };
 	object_ptr<Media::Player::VolumeWidget> _playerVolume = { nullptr };
 	object_ptr<Media::Player::Panel> _playerPlaylist;
 	object_ptr<Media::Player::Panel> _playerPanel;
@@ -558,6 +562,7 @@ private:
 
 	int _playerHeight = 0;
 	int _callTopBarHeight = 0;
+	int _exportTopBarHeight = 0;
 	int _contentScrollAddToY = 0;
 
 	int32 updDate = 0;
